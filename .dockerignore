@@ -1,0 +1,5 @@
+*.xlsx
+*.bat
+COPIA SEGURIDAD*
+.claude/
+__pycache__/

@@ -1,0 +1,15 @@
+services:
+  checklist:
+    build: .
+    container_name: checklist-sshh
+    ports:
+      - "8740:8740"
+    volumes:
+      # La carpeta actual (con el Excel de respuestas) se monta como /datos.
+      # Así el contenedor usa tu base de datos real y nada se pierde al actualizar.
+      - ./:/datos
+    environment:
+      # Cambia las claves aquí para no dejarlas en el código
+      - CLAVE_ADMIN=FMI2026
+      - CLAVE_EDITOR=FME2026
+    restart: unless-stopped
