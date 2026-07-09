@@ -12,10 +12,12 @@ Todas las respuestas se guardan en el Excel existente
 "CHECK LIST SS.HH DE LA CORPORACION (Respuestas).xlsx" (hoja "Respuestas de formulario 1"),
 respetando las 18 columnas actuales.
 """
+import hashlib
 import io
 import json
 import os
 import threading
+import urllib.parse
 import urllib.request
 import webbrowser
 from datetime import datetime, timedelta, timezone
@@ -38,6 +40,17 @@ NUM_COLUMNAS = 21  # Marca temporal ... MONTO (S/), PRIORIDAD, FECHA ATENCION
 CLAVE_ADMIN = os.environ.get("CLAVE_ADMIN", "FMI2026")
 # >>> CLAVE LIMITADA: solo permite editar COMENTARIO FMI / PROVEEDOR y COTIZACION PROVEEDOR <<<
 CLAVE_EDITOR = os.environ.get("CLAVE_EDITOR", "FME2026")
+# >>> CLAVE DE ACCESO: para VER el panel/dashboard/historial (el formulario queda libre).
+# >>> Las claves de administrador y limitada también sirven para entrar. <<<
+CLAVE_ACCESO = os.environ.get("CLAVE_ACCESO", "CORP2026")
+
+
+def _token_acceso(clave):
+    return hashlib.sha256(("fmi-acceso|" + clave).encode("utf-8")).hexdigest()
+
+
+TOKENS_ACCESO = {_token_acceso(c) for c in (CLAVE_ACCESO, CLAVE_ADMIN, CLAVE_EDITOR)}
+RUTAS_PROTEGIDAS = ("/control", "/dashboard", "/historial", "/descargar")
 
 ENCABEZADOS = [
     "Marca temporal", "EDIFICIO", "PISO", "UBICACION", "EMPRESAS", "SS.HH ",
@@ -1383,6 +1396,38 @@ graficoMeses();
 })();
 """
 
+PAGINA_ACCESO = """<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Acceso - CHECK LIST SS.HH</title>
+<style>
+__ESTILO__
+.caja { max-width:400px; margin:9vh auto 0; background:var(--superficie); border:1px solid var(--linea); border-radius:14px; padding:34px 34px 30px; }
+.kicker { font-size:11px; font-weight:600; letter-spacing:.14em; color:var(--acento); margin-bottom:10px; }
+h1 { font-family:Georgia,"Times New Roman",serif; font-size:23px; font-weight:400; color:var(--tinta); margin-bottom:8px; }
+p { font-size:13px; color:var(--tinta2); margin-bottom:20px; }
+input[type=password] { width:100%; border:1px solid var(--linea); border-radius:9px; padding:11px 14px; font-size:15px; outline:none; background:var(--superficie); color:var(--tinta); margin-bottom:14px; }
+input[type=password]:focus { border-color:var(--acento); }
+button { width:100%; background:var(--acento); color:#fff; border:none; border-radius:9px; padding:12px; font-size:14px; font-weight:600; cursor:pointer; }
+button:hover { background:var(--acento-osc); }
+.error { border:1px solid var(--linea); border-left:4px solid var(--alerta); color:var(--alerta); border-radius:9px; padding:10px 14px; font-size:13px; margin-bottom:14px; }
+.volver { display:block; text-align:center; margin-top:16px; font-size:13px; }
+</style></head>
+<body>
+<div class="caja">
+  <div class="kicker">FMI · MANTENIMIENTO</div>
+  <h1>🔒 Área protegida</h1>
+  <p>Esta sección contiene información de la corporación. Ingresa la clave de acceso para continuar.</p>
+  __ERROR__
+  <form method="POST" action="/acceso">
+    <input type="hidden" name="destino" value="__DESTINO__">
+    <input type="password" name="clave" placeholder="Clave de acceso" autofocus required>
+    <button type="submit">Ingresar</button>
+  </form>
+  <a class="volver" href="/">← Volver al formulario de registro</a>
+</div>
+</body></html>"""
+
 PAGINA_HISTORIAL = """<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1487,7 +1532,26 @@ class Manejador(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(cuerpo)
 
+    def _tiene_acceso(self):
+        for parte in self.headers.get("Cookie", "").split(";"):
+            parte = parte.strip()
+            if parte.startswith("acceso=") and parte[7:] in TOKENS_ACCESO:
+                return True
+        return False
+
+    def _pagina_acceso(self, destino, error=""):
+        pagina = (PAGINA_ACCESO
+                  .replace("__ESTILO__", ESTILO_BASE)
+                  .replace("__DESTINO__", destino.replace('"', ""))
+                  .replace("__ERROR__", f'<div class="error">{error}</div>' if error else ""))
+        self._responder(200, pagina, "text/html")
+
     def do_GET(self):
+        if (any(self.path.startswith(r) for r in RUTAS_PROTEGIDAS)
+                and not self.path.startswith("/dashboard.js")
+                and not self._tiene_acceso()):
+            self._pagina_acceso(self.path)
+            return
         if self.path in ("/", "/index.html"):
             pagina = (PAGINA_FORM
                       .replace("__ESTILO__", ESTILO_BASE)
@@ -1556,6 +1620,23 @@ class Manejador(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(largo).decode("utf-8"))
 
     def do_POST(self):
+        if self.path == "/acceso":
+            largo = int(self.headers.get("Content-Length", 0))
+            datos = urllib.parse.parse_qs(self.rfile.read(largo).decode("utf-8"))
+            clave = (datos.get("clave") or [""])[0].strip()
+            destino = (datos.get("destino") or ["/control"])[0]
+            if not destino.startswith("/") or destino.startswith("//"):
+                destino = "/control"
+            if clave in (CLAVE_ACCESO, CLAVE_ADMIN, CLAVE_EDITOR):
+                self.send_response(303)
+                self.send_header("Location", destino)
+                self.send_header("Set-Cookie",
+                                 f"acceso={_token_acceso(clave)}; Path=/; Max-Age=2592000; SameSite=Lax; HttpOnly")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self._pagina_acceso(destino, "Clave incorrecta. Intenta de nuevo.")
+            return
         try:
             if self.path == "/guardar":
                 fila = guardar_registro(self._leer_json())
@@ -1621,6 +1702,7 @@ def main():
     print("=" * 60)
     print(f"  Formulario:        {url}")
     print(f"  Panel de control:  {url}/control")
+    print(f"  Clave de ACCESO al panel (solo ver): {CLAVE_ACCESO}")
     print(f"  Clave de administrador (edita todo): {CLAVE_ADMIN}")
     print(f"  Clave limitada (solo COMENTARIO FMI / COTIZACION PROVEEDOR): {CLAVE_EDITOR}")
     if USAR_SUPABASE:
