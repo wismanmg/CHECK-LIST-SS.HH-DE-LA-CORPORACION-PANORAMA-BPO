@@ -1443,6 +1443,10 @@ class Manejador(BaseHTTPRequestHandler):
                 self._responder(200, "<h3 style='font-family:Arial'>⚠️ El archivo Excel está abierto en otro programa. Ciérralo e intenta de nuevo.</h3>", "text/html")
             except Exception as e:
                 self._responder(200, f"<h3 style='font-family:Arial'>⚠️ Error de conexión con la base de datos: {e}</h3>", "text/html")
+        elif self.path.startswith("/ping"):
+            # respuesta mínima para monitores de disponibilidad (UptimeRobot);
+            # no toca la base de datos, solo confirma que el servicio está despierto
+            self._responder(200, "ok", "text/plain")
         else:
             self._responder(404, "No encontrado", "text/plain")
 
