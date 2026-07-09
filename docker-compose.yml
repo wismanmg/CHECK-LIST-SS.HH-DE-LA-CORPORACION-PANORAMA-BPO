@@ -12,4 +12,8 @@ services:
       # Cambia las claves aquí para no dejarlas en el código
       - CLAVE_ADMIN=FMI2026
       - CLAVE_EDITOR=FME2026
+      # Para usar Supabase en lugar del Excel local, descomenta y completa:
+      # - SUPABASE_URL=https://TU-PROYECTO.supabase.co
+      # - SUPABASE_KEY=clave-service_role
+      # - ZONA_HORARIA=-5
     restart: unless-stopped

@@ -16,8 +16,9 @@ import io
 import json
 import os
 import threading
+import urllib.request
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from openpyxl import Workbook, load_workbook
@@ -28,8 +29,9 @@ CARPETA = os.environ.get("CARPETA_DATOS") or os.path.dirname(os.path.abspath(__f
 ARCHIVO_EXCEL = os.path.join(CARPETA, "CHECK LIST SS.HH DE LA CORPORACION (Respuestas).xlsx")
 HOJA = "Respuestas de formulario 1"
 HOJA_HISTORIAL = "HISTORIAL"
-PUERTO = int(os.environ.get("PUERTO", "8740"))
-ABRIR_NAVEGADOR = os.environ.get("SIN_NAVEGADOR") != "1"
+# PORT la asignan plataformas en la nube (Render, Railway, Heroku); PUERTO es la local
+PUERTO = int(os.environ.get("PORT") or os.environ.get("PUERTO") or "8740")
+ABRIR_NAVEGADOR = os.environ.get("SIN_NAVEGADOR") != "1" and "PORT" not in os.environ
 NUM_COLUMNAS = 20  # Marca temporal ... COTIZACION PO, MONTO (S/), PRIORIDAD
 
 # >>> CLAVE DEL MODO ADMINISTRADOR: edita todo (cámbiala aquí o por variable de entorno) <<<
@@ -44,6 +46,13 @@ ENCABEZADOS = [
     "COMENTARIO FMI / PROVEEDOR", "COTIZACION  PROVEEDOR", "ESTATUS",
     "COTIZACION  PO", "MONTO (S/)", "PRIORIDAD",
 ]
+
+# ------- Supabase (PostgreSQL en la nube). Si estas variables existen, la app
+# ------- guarda ahí en lugar del Excel local. Ideal para Render (disco efímero).
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+USAR_SUPABASE = bool(SUPABASE_URL and SUPABASE_KEY)
+ZONA = timezone(timedelta(hours=int(os.environ.get("ZONA_HORARIA", "-5"))))  # Perú: UTC-5
 
 ESTADOS = ["PENDIENTE", "SOLI.COTI.PROV", "COTIZACION", "APROBADO", "EN_ EJECUCION", "ATENDIDO"]
 
@@ -91,7 +100,7 @@ def _log(hist, fila_caso, usuario, campo, antes, despues):
         c.font = Font(name="Arial", size=9)
 
 
-def guardar_registro(d):
+def guardar_registro_excel(d):
     with candado:
         wb = load_workbook(ARCHIVO_EXCEL)
         ws = wb[HOJA]
@@ -158,22 +167,7 @@ def _aplicar_cambios(d, campos, usuario):
         wb.save(ARCHIVO_EXCEL)
 
 
-def actualizar_control(d, usuario=""):
-    """Actualiza solo las columnas de seguimiento (15-19)."""
-    _aplicar_cambios(d, {15: "comentario_mili", 16: "proveedor", 17: "estatus", 18: "po", 19: "monto"}, usuario)
-
-
-def editar_registro(d, usuario=""):
-    """Modo administrador: edita todos los campos de la observación (columnas 2-14)."""
-    _aplicar_cambios(d, {
-        2: "edificio", 3: "piso", 4: "ubicacion", 5: "empresas",
-        6: "sshh", 7: "lavatorio", 8: "mesa", 9: "inodoro",
-        10: "puertas", 11: "urinario", 12: "descripcion",
-        13: "comentario", 14: "dispensador", 20: "prioridad",
-    }, usuario)
-
-
-def leer_historial():
+def leer_historial_excel():
     with candado:
         wb = load_workbook(ARCHIVO_EXCEL)
         if HOJA_HISTORIAL not in wb.sheetnames:
@@ -185,8 +179,191 @@ def leer_historial():
             filas.append([("" if v is None else str(v)) for v in row])
         return filas
 
+# ---------------------------------------------------------------- Supabase
+
+CAMPO_A_COLUMNA = {
+    "edificio": "edificio", "piso": "piso", "ubicacion": "ubicacion", "empresas": "empresas",
+    "sshh": "sshh", "lavatorio": "lavatorio", "mesa": "mesa", "inodoro": "inodoro",
+    "puertas": "puertas", "urinario": "urinario", "descripcion": "descripcion",
+    "comentario": "comentario", "dispensador": "dispensador", "prioridad": "prioridad",
+    "comentario_mili": "comentario_fmi", "proveedor": "proveedor", "estatus": "estatus",
+    "po": "po", "monto": "monto",
+}
+NOMBRE_CAMPO = {
+    "edificio": "EDIFICIO", "piso": "PISO", "ubicacion": "UBICACION", "empresas": "EMPRESAS",
+    "sshh": "SS.HH", "lavatorio": "LAVATORIO", "mesa": "MESA DE LABATORIOS",
+    "inodoro": "INODORO", "puertas": "PUERTAS DE INODOROS", "urinario": "URINARIO",
+    "descripcion": "DESCRIPCION", "comentario": "Comentario", "dispensador": "DiSPENSADOR",
+    "comentario_mili": "COMENTARIO FMI / PROVEEDOR", "proveedor": "COTIZACION PROVEEDOR",
+    "estatus": "ESTATUS", "po": "COTIZACION PO", "monto": "MONTO (S/)", "prioridad": "PRIORIDAD",
+}
+
+
+def _sb(metodo, tabla, datos=None, params=""):
+    """Llamada REST a Supabase (PostgREST) usando solo la librería estándar."""
+    url = f"{SUPABASE_URL}/rest/v1/{tabla}" + (("?" + params) if params else "")
+    cuerpo = json.dumps(datos).encode("utf-8") if datos is not None else None
+    peticion = urllib.request.Request(url, data=cuerpo, method=metodo, headers={
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    })
+    try:
+        with urllib.request.urlopen(peticion, timeout=20) as r:
+            texto = r.read().decode("utf-8")
+            return json.loads(texto) if texto else []
+    except urllib.error.HTTPError as e:
+        detalle = e.read().decode("utf-8", "ignore")[:300]
+        raise RuntimeError(f"Supabase respondió {e.code}: {detalle}")
+
+
+def _fecha_local(iso):
+    try:
+        return datetime.fromisoformat(iso).astimezone(ZONA)
+    except (ValueError, TypeError):
+        return None
+
+
+def guardar_registro_sb(d):
+    fila = {
+        "edificio": d.get("edificio", ""), "piso": d.get("piso", ""),
+        "ubicacion": d.get("ubicacion", ""), "empresas": d.get("empresas", ""),
+        "sshh": d.get("sshh", ""), "lavatorio": d.get("lavatorio", ""),
+        "mesa": d.get("mesa_lavatorios", ""), "inodoro": d.get("inodoro", ""),
+        "puertas": d.get("puertas_inodoros", ""), "urinario": d.get("urinario", ""),
+        "descripcion": d.get("descripcion", ""), "comentario": d.get("comentario", ""),
+        "prioridad": d.get("prioridad", ""), "estatus": "PENDIENTE",
+    }
+    creado = _sb("POST", "observaciones", fila)
+    nuevo_id = creado[0]["id"]
+    _sb("POST", "historial", {
+        "caso_id": nuevo_id, "usuario": "FORMULARIO", "campo": "NUEVO REGISTRO",
+        "valor_anterior": "", "valor_nuevo": d.get("descripcion", "") or "(sin descripción)",
+    })
+    return nuevo_id
+
+
+def leer_registros_sb():
+    filas = _sb("GET", "observaciones", params="select=*&order=id.asc")
+    ahora = datetime.now(ZONA)
+    registros = []
+    for f in filas:
+        fecha_txt, dias = "", None
+        dt = _fecha_local(f.get("marca_temporal"))
+        if dt:
+            fecha_txt = dt.strftime("%d/%m/%Y %H:%M")
+            dias = (ahora - dt).days
+        registros.append({
+            "fila": f["id"], "fecha": fecha_txt, "dias": dias,
+            "edificio": f.get("edificio") or "", "piso": f.get("piso") or "",
+            "ubicacion": f.get("ubicacion") or "", "empresas": f.get("empresas") or "",
+            "sshh": f.get("sshh") or "", "lavatorio": f.get("lavatorio") or "",
+            "mesa": f.get("mesa") or "", "inodoro": f.get("inodoro") or "",
+            "puertas": f.get("puertas") or "", "urinario": f.get("urinario") or "",
+            "descripcion": f.get("descripcion") or "", "comentario": f.get("comentario") or "",
+            "dispensador": f.get("dispensador") or "",
+            "comentario_mili": f.get("comentario_fmi") or "",
+            "proveedor": f.get("proveedor") or "",
+            "estatus": (f.get("estatus") or "").strip(),
+            "po": f.get("po") or "",
+            "monto": "" if f.get("monto") is None else str(f["monto"]),
+            "prioridad": (f.get("prioridad") or "").strip().upper(),
+        })
+    return registros
+
+
+def _aplicar_cambios_sb(d, claves, usuario):
+    id_caso = int(d["fila"])
+    actual = _sb("GET", "observaciones", params=f"select=*&id=eq.{id_caso}")
+    if not actual:
+        raise ValueError("Caso no encontrado")
+    actual = actual[0]
+    cambios, eventos = {}, []
+    for clave in claves:
+        if clave not in d:
+            continue
+        columna = CAMPO_A_COLUMNA[clave]
+        nuevo = str(d[clave]).strip()
+        if clave == "monto":
+            valor = None
+            if nuevo:
+                try:
+                    valor = float(nuevo.replace(",", "."))
+                except ValueError:
+                    valor = None
+            viejo_s = "" if actual.get(columna) is None else str(actual[columna])
+            nuevo_s = "" if valor is None else str(valor)
+            nuevo_db = valor
+        else:
+            viejo_s = str(actual.get(columna) or "").strip()
+            nuevo_s = nuevo
+            nuevo_db = nuevo
+        if viejo_s != nuevo_s:
+            cambios[columna] = nuevo_db
+            eventos.append({
+                "caso_id": id_caso, "usuario": usuario,
+                "campo": NOMBRE_CAMPO.get(clave, clave),
+                "valor_anterior": viejo_s, "valor_nuevo": nuevo_s,
+            })
+    if cambios:
+        _sb("PATCH", "observaciones", cambios, params=f"id=eq.{id_caso}")
+        for evento in eventos:
+            _sb("POST", "historial", evento)
+
+
+def leer_historial_sb():
+    filas = _sb("GET", "historial", params="select=*&order=id.asc")
+    salida = []
+    for f in filas:
+        dt = _fecha_local(f.get("fecha"))
+        salida.append([
+            dt.strftime("%d/%m/%Y %H:%M:%S") if dt else "",
+            str(f.get("caso_id") or ""), f.get("usuario") or "",
+            f.get("campo") or "", f.get("valor_anterior") or "", f.get("valor_nuevo") or "",
+        ])
+    return salida
+
+# ------------------------------------------------- despachadores de backend
+
+def guardar_registro(d):
+    return guardar_registro_sb(d) if USAR_SUPABASE else guardar_registro_excel(d)
+
+
+def actualizar_control(d, usuario=""):
+    """Actualiza solo las columnas de seguimiento."""
+    if USAR_SUPABASE:
+        _aplicar_cambios_sb(d, ["comentario_mili", "proveedor", "estatus", "po", "monto"], usuario)
+    else:
+        _aplicar_cambios(d, {15: "comentario_mili", 16: "proveedor", 17: "estatus", 18: "po", 19: "monto"}, usuario)
+
+
+def editar_registro(d, usuario=""):
+    """Modo administrador: edita todos los campos de la observación."""
+    if USAR_SUPABASE:
+        _aplicar_cambios_sb(d, ["edificio", "piso", "ubicacion", "empresas", "sshh", "lavatorio",
+                                "mesa", "inodoro", "puertas", "urinario", "descripcion",
+                                "comentario", "dispensador", "prioridad"], usuario)
+    else:
+        _aplicar_cambios(d, {
+            2: "edificio", 3: "piso", 4: "ubicacion", 5: "empresas",
+            6: "sshh", 7: "lavatorio", 8: "mesa", 9: "inodoro",
+            10: "puertas", 11: "urinario", 12: "descripcion",
+            13: "comentario", 14: "dispensador", 20: "prioridad",
+        }, usuario)
+
+
+def leer_historial():
+    return leer_historial_sb() if USAR_SUPABASE else leer_historial_excel()
+
 
 def leer_registros():
+    if USAR_SUPABASE:
+        return leer_registros_sb()
+    return leer_registros_excel()
+
+
+def leer_registros_excel():
     with candado:
         wb = load_workbook(ARCHIVO_EXCEL)
         ws = wb[HOJA]
@@ -226,12 +403,24 @@ def leer_registros():
         return registros
 
 def generar_resumen():
-    """Genera un Excel en memoria con hoja RESUMEN (totales) y hoja DETALLE (todos los casos)."""
-    with candado:
-        wb_src = load_workbook(ARCHIVO_EXCEL)
-        ws_src = wb_src[HOJA]
-        encabezados = [ws_src.cell(row=1, column=c).value or "" for c in range(1, NUM_COLUMNAS + 1)]
-        datos = filas_con_datos(ws_src)
+    """Genera un Excel en memoria con hoja RESUMEN (totales) y hoja DETALLE (todos los casos).
+    Funciona con ambos backends porque parte de leer_registros()."""
+    registros = leer_registros()
+    encabezados = ENCABEZADOS
+    datos = []
+    for r in registros:
+        monto = ""
+        if r["monto"]:
+            try:
+                monto = float(str(r["monto"]).replace(",", "."))
+            except ValueError:
+                monto = r["monto"]
+        datos.append([
+            r["fecha"], r["edificio"], r["piso"], r["ubicacion"], r["empresas"], r["sshh"],
+            r["lavatorio"], r["mesa"], r["inodoro"], r["puertas"], r["urinario"],
+            r["descripcion"], r["comentario"], r["dispensador"], r["comentario_mili"],
+            r["proveedor"], r["estatus"], r["po"], monto, r["prioridad"],
+        ])
 
     morado = PatternFill("solid", start_color="673AB7")
     gris = PatternFill("solid", start_color="E8EAED")
@@ -251,12 +440,11 @@ def generar_resumen():
         celda.font = f_cab
         celda.fill = morado
         celda.alignment = Alignment(vertical="center", wrap_text=True)
-    for r, (_, vals) in enumerate(datos, start=2):
+    for r, vals in enumerate(datos, start=2):
         for c, v in enumerate(vals, 1):
             celda = det.cell(row=r, column=c, value=v)
             celda.font = f_normal
             celda.alignment = Alignment(vertical="top", wrap_text=True)
-        det.cell(row=r, column=1).number_format = "dd/mm/yyyy hh:mm"
     anchos = [16, 10, 9, 18, 20, 14, 14, 14, 14, 14, 12, 45, 25, 12, 20, 14, 14, 14, 12, 12]
     for i, ancho in enumerate(anchos, 1):
         det.column_dimensions[det.cell(row=1, column=i).column_letter].width = ancho
@@ -310,7 +498,7 @@ def generar_resumen():
 
     def unicos(indice):
         vistos = []
-        for _, vals in datos:
+        for vals in datos:
             v = str(vals[indice]).strip() if vals[indice] is not None else ""
             if v and v not in vistos:
                 vistos.append(v)
@@ -1213,6 +1401,8 @@ class Manejador(BaseHTTPRequestHandler):
                 self._responder(200, pagina, "text/html")
             except PermissionError:
                 self._responder(200, "<h3 style='font-family:Arial'>⚠️ El archivo Excel está abierto en otro programa. Ciérralo y recarga la página.</h3>", "text/html")
+            except Exception as e:
+                self._responder(200, f"<h3 style='font-family:Arial'>⚠️ Error de conexión con la base de datos: {e}</h3>", "text/html")
         elif self.path.startswith("/dashboard.js"):
             self._responder(200, JS_DASHBOARD, "application/javascript")
         elif self.path.startswith("/dashboard"):
@@ -1224,6 +1414,8 @@ class Manejador(BaseHTTPRequestHandler):
                 self._responder(200, pagina, "text/html")
             except PermissionError:
                 self._responder(200, "<h3 style='font-family:Arial'>⚠️ El archivo Excel está abierto en otro programa. Ciérralo y recarga la página.</h3>", "text/html")
+            except Exception as e:
+                self._responder(200, f"<h3 style='font-family:Arial'>⚠️ Error de conexión con la base de datos: {e}</h3>", "text/html")
         elif self.path.startswith("/historial"):
             try:
                 filas = leer_historial()
@@ -1233,6 +1425,8 @@ class Manejador(BaseHTTPRequestHandler):
                 self._responder(200, pagina, "text/html")
             except PermissionError:
                 self._responder(200, "<h3 style='font-family:Arial'>⚠️ El archivo Excel está abierto en otro programa. Ciérralo y recarga la página.</h3>", "text/html")
+            except Exception as e:
+                self._responder(200, f"<h3 style='font-family:Arial'>⚠️ Error de conexión con la base de datos: {e}</h3>", "text/html")
         elif self.path.startswith("/descargar"):
             try:
                 contenido = generar_resumen()
@@ -1245,6 +1439,8 @@ class Manejador(BaseHTTPRequestHandler):
                 self.wfile.write(contenido)
             except PermissionError:
                 self._responder(200, "<h3 style='font-family:Arial'>⚠️ El archivo Excel está abierto en otro programa. Ciérralo e intenta de nuevo.</h3>", "text/html")
+            except Exception as e:
+                self._responder(200, f"<h3 style='font-family:Arial'>⚠️ Error de conexión con la base de datos: {e}</h3>", "text/html")
         else:
             self._responder(404, "No encontrado", "text/plain")
 
@@ -1309,7 +1505,8 @@ def crear_excel_si_no_existe():
 
 
 def main():
-    crear_excel_si_no_existe()
+    if not USAR_SUPABASE:
+        crear_excel_si_no_existe()
     servidor = ThreadingHTTPServer(("0.0.0.0", PUERTO), Manejador)
     url = f"http://localhost:{PUERTO}"
     print("=" * 60)
@@ -1319,7 +1516,10 @@ def main():
     print(f"  Panel de control:  {url}/control")
     print(f"  Clave de administrador (edita todo): {CLAVE_ADMIN}")
     print(f"  Clave limitada (solo COMENTARIO FMI / COTIZACION PROVEEDOR): {CLAVE_EDITOR}")
-    print(f"  Base de datos:     {os.path.basename(ARCHIVO_EXCEL)}")
+    if USAR_SUPABASE:
+        print(f"  Base de datos:     Supabase ({SUPABASE_URL})")
+    else:
+        print(f"  Base de datos:     {os.path.basename(ARCHIVO_EXCEL)}")
     print("  Para detener, cierra esta ventana.")
     print("=" * 60)
     if ABRIR_NAVEGADOR:
