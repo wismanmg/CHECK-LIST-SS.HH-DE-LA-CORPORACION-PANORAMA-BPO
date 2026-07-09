@@ -12,7 +12,6 @@ Todas las respuestas se guardan en el Excel existente
 "CHECK LIST SS.HH DE LA CORPORACION (Respuestas).xlsx" (hoja "Respuestas de formulario 1"),
 respetando las 18 columnas actuales.
 """
-import base64
 import io
 import json
 import os
@@ -519,36 +518,6 @@ def generar_resumen():
 
 
 
-# ---------------------------------------------------------------- PWA
-# Íconos PNG incrustados (generados con la paleta del rediseño)
-ICONO_192 = base64.b64decode("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")
-ICONO_512 = base64.b64decode("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")
-
-MANIFEST_JSON = json.dumps({
-    "name": "CHECK LIST SS.HH FMI",
-    "short_name": "CHECK LIST FMI",
-    "description": "Registro y control de observaciones de SS.HH. de la corporación",
-    "start_url": "/",
-    "display": "standalone",
-    "background_color": "#F6F5F1",
-    "theme_color": "#0F6B5C",
-    "icons": [
-        {"src": "/icono-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
-        {"src": "/icono-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
-        {"src": "/icono-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
-    ],
-}, ensure_ascii=False)
-
-SW_JS = """
-self.addEventListener('install', e => self.skipWaiting());
-self.addEventListener('activate', e => self.clients.claim());
-self.addEventListener('fetch', e => {
-  e.respondWith(fetch(e.request).catch(() =>
-    new Response('<h3 style="font-family:sans-serif">Sin conexión a internet. Intenta de nuevo.</h3>',
-                 {status: 503, headers: {'Content-Type': 'text/html; charset=utf-8'}})));
-});
-"""
-
 # ---------------------------------------------------------------- HTML
 
 ESTILO_BASE = """
@@ -571,12 +540,6 @@ a { color:var(--acento); text-decoration:none; }
 PAGINA_FORM = """<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="manifest" href="/manifest.json">
-<meta name="theme-color" content="#0F6B5C">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<link rel="icon" type="image/png" href="/icono-192.png">
-<link rel="apple-touch-icon" href="/icono-192.png">
-<script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");</script>
 <title>CHECK LIST SS.HH DE LA CORPORACION</title>
 <style>
 __ESTILO__
@@ -728,12 +691,6 @@ form.addEventListener("submit", async e => {
 PAGINA_CONTROL = """<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="manifest" href="/manifest.json">
-<meta name="theme-color" content="#0F6B5C">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<link rel="icon" type="image/png" href="/icono-192.png">
-<link rel="apple-touch-icon" href="/icono-192.png">
-<script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");</script>
 <title>Panel de Control - CHECK LIST SS.HH</title>
 <style>
 __ESTILO__
@@ -1150,12 +1107,6 @@ if (claveAdmin) {
 PAGINA_DASHBOARD = """<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="manifest" href="/manifest.json">
-<meta name="theme-color" content="#0F6B5C">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<link rel="icon" type="image/png" href="/icono-192.png">
-<link rel="apple-touch-icon" href="/icono-192.png">
-<script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");</script>
 <title>Dashboard - CHECK LIST SS.HH</title>
 <style>
 __ESTILO__
@@ -1334,12 +1285,6 @@ graficoMeses();
 PAGINA_HISTORIAL = """<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="manifest" href="/manifest.json">
-<meta name="theme-color" content="#0F6B5C">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<link rel="icon" type="image/png" href="/icono-192.png">
-<link rel="apple-touch-icon" href="/icono-192.png">
-<script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");</script>
 <title>Historial de cambios - CHECK LIST SS.HH</title>
 <style>
 __ESTILO__
@@ -1498,18 +1443,6 @@ class Manejador(BaseHTTPRequestHandler):
                 self._responder(200, "<h3 style='font-family:Arial'>⚠️ El archivo Excel está abierto en otro programa. Ciérralo e intenta de nuevo.</h3>", "text/html")
             except Exception as e:
                 self._responder(200, f"<h3 style='font-family:Arial'>⚠️ Error de conexión con la base de datos: {e}</h3>", "text/html")
-        elif self.path == "/manifest.json":
-            self._responder(200, MANIFEST_JSON, "application/manifest+json")
-        elif self.path == "/sw.js":
-            self._responder(200, SW_JS, "application/javascript")
-        elif self.path in ("/icono-192.png", "/icono-512.png"):
-            icono = ICONO_192 if "192" in self.path else ICONO_512
-            self.send_response(200)
-            self.send_header("Content-Type", "image/png")
-            self.send_header("Content-Length", str(len(icono)))
-            self.send_header("Cache-Control", "public, max-age=86400")
-            self.end_headers()
-            self.wfile.write(icono)
         else:
             self._responder(404, "No encontrado", "text/plain")
 
