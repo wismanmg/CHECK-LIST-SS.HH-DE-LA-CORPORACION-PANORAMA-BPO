@@ -32,7 +32,7 @@ HOJA_HISTORIAL = "HISTORIAL"
 # PORT la asignan plataformas en la nube (Render, Railway, Heroku); PUERTO es la local
 PUERTO = int(os.environ.get("PORT") or os.environ.get("PUERTO") or "8740")
 ABRIR_NAVEGADOR = os.environ.get("SIN_NAVEGADOR") != "1" and "PORT" not in os.environ
-NUM_COLUMNAS = 20  # Marca temporal ... COTIZACION PO, MONTO (S/), PRIORIDAD
+NUM_COLUMNAS = 21  # Marca temporal ... MONTO (S/), PRIORIDAD, FECHA ATENCION
 
 # >>> CLAVE DEL MODO ADMINISTRADOR: edita todo (cámbiala aquí o por variable de entorno) <<<
 CLAVE_ADMIN = os.environ.get("CLAVE_ADMIN", "FMI2026")
@@ -44,7 +44,7 @@ ENCABEZADOS = [
     "LAVATORIO", "MESA DE LABATORIOS", "INODORO", "PUERTAS DE INODOROS",
     "URINARIO", "DESCRIPCION ", "Comentario", "DiSPENSADOR",
     "COMENTARIO FMI / PROVEEDOR", "COTIZACION  PROVEEDOR", "ESTATUS",
-    "COTIZACION  PO", "MONTO (S/)", "PRIORIDAD",
+    "COTIZACION  PO", "MONTO (S/)", "PRIORIDAD", "FECHA ATENCION",
 ]
 
 # ------- Supabase (PostgreSQL en la nube). Si estas variables existen, la app
@@ -165,6 +165,25 @@ def _aplicar_cambios(d, campos, usuario):
             _escribir(ws, fila, col, valor)
             if clave == "monto" and isinstance(valor, float):
                 ws.cell(row=fila, column=col).number_format = "#,##0.00"
+        # fecha de atención automática: se fija al pasar a ATENDIDO, se limpia al reabrir
+        if "estatus" in campos.values() and "estatus" in d:
+            nuevo_est = str(d["estatus"]).strip()
+            celda_fa = ws.cell(row=fila, column=21)
+            tiene_fa = celda_fa.value not in (None, "")
+            if nuevo_est == "ATENDIDO" and not tiene_fa:
+                ahora = datetime.now()
+                _escribir(ws, fila, 21, ahora)
+                ws.cell(row=fila, column=21).number_format = "dd/mm/yyyy hh:mm"
+                if hist is None:
+                    hist = _hoja_historial(wb)
+                _log(hist, fila, usuario, "FECHA ATENCION", "", ahora.strftime("%d/%m/%Y %H:%M"))
+            elif nuevo_est != "ATENDIDO" and tiene_fa:
+                viejo_fa = celda_fa.value
+                viejo_txt = viejo_fa.strftime("%d/%m/%Y %H:%M") if isinstance(viejo_fa, datetime) else str(viejo_fa)
+                _escribir(ws, fila, 21, "")
+                if hist is None:
+                    hist = _hoja_historial(wb)
+                _log(hist, fila, usuario, "FECHA ATENCION", viejo_txt, "")
         wb.save(ARCHIVO_EXCEL)
 
 
@@ -270,7 +289,13 @@ def leer_registros_sb():
             "po": f.get("po") or "",
             "monto": "" if f.get("monto") is None else str(f["monto"]),
             "prioridad": (f.get("prioridad") or "").strip().upper(),
+            "fecha_atencion": "", "dias_res": None,
         })
+        fa = _fecha_local(f.get("fecha_atencion"))
+        if fa:
+            registros[-1]["fecha_atencion"] = fa.strftime("%d/%m/%Y")
+            if dt:
+                registros[-1]["dias_res"] = (fa - dt).days
     return registros
 
 
@@ -307,8 +332,33 @@ def _aplicar_cambios_sb(d, claves, usuario):
                 "campo": NOMBRE_CAMPO.get(clave, clave),
                 "valor_anterior": viejo_s, "valor_nuevo": nuevo_s,
             })
+    # fecha de atención automática: se fija al pasar a ATENDIDO, se limpia al reabrir
+    if "estatus" in claves and "estatus" in d:
+        nuevo_est = str(d["estatus"]).strip()
+        tiene_fa = bool(actual.get("fecha_atencion"))
+        base_evento = {"caso_id": id_caso, "usuario": usuario, "campo": "FECHA ATENCION"}
+        if nuevo_est == "ATENDIDO" and not tiene_fa:
+            ahora = datetime.now(timezone.utc)
+            cambios["fecha_atencion"] = ahora.isoformat()
+            eventos.append({**base_evento, "valor_anterior": "",
+                            "valor_nuevo": ahora.astimezone(ZONA).strftime("%d/%m/%Y %H:%M")})
+        elif nuevo_est != "ATENDIDO" and tiene_fa:
+            cambios["fecha_atencion"] = None
+            fa = _fecha_local(actual.get("fecha_atencion"))
+            eventos.append({**base_evento, "valor_nuevo": "",
+                            "valor_anterior": fa.strftime("%d/%m/%Y %H:%M") if fa else ""})
     if cambios:
-        _sb("PATCH", "observaciones", cambios, params=f"id=eq.{id_caso}")
+        try:
+            _sb("PATCH", "observaciones", cambios, params=f"id=eq.{id_caso}")
+        except RuntimeError as e:
+            # si la columna fecha_atencion aún no existe en Supabase, guardar el resto igual
+            if "fecha_atencion" in str(e) and "fecha_atencion" in cambios:
+                cambios.pop("fecha_atencion")
+                eventos = [ev for ev in eventos if ev["campo"] != "FECHA ATENCION"]
+                if cambios:
+                    _sb("PATCH", "observaciones", cambios, params=f"id=eq.{id_caso}")
+            else:
+                raise
         for evento in eventos:
             _sb("POST", "historial", evento)
 
@@ -400,6 +450,8 @@ def leer_registros_excel():
                 "po": str(v[17]),
                 "monto": str(v[18]),
                 "prioridad": str(v[19]).strip().upper(),
+                "fecha_atencion": v[20].strftime("%d/%m/%Y") if isinstance(v[20], datetime) else "",
+                "dias_res": (v[20] - v[0]).days if isinstance(v[20], datetime) and isinstance(v[0], datetime) else None,
             })
         return registros
 
@@ -420,7 +472,7 @@ def generar_resumen():
             r["fecha"], r["edificio"], r["piso"], r["ubicacion"], r["empresas"], r["sshh"],
             r["lavatorio"], r["mesa"], r["inodoro"], r["puertas"], r["urinario"],
             r["descripcion"], r["comentario"], r["dispensador"], r["comentario_mili"],
-            r["proveedor"], r["estatus"], r["po"], monto, r["prioridad"],
+            r["proveedor"], r["estatus"], r["po"], monto, r["prioridad"], r["fecha_atencion"],
         ])
 
     morado = PatternFill("solid", start_color="673AB7")
@@ -446,12 +498,12 @@ def generar_resumen():
             celda = det.cell(row=r, column=c, value=v)
             celda.font = f_normal
             celda.alignment = Alignment(vertical="top", wrap_text=True)
-    anchos = [16, 10, 9, 18, 20, 14, 14, 14, 14, 14, 12, 45, 25, 12, 20, 14, 14, 14, 12, 12]
+    anchos = [16, 10, 9, 18, 20, 14, 14, 14, 14, 14, 12, 45, 25, 12, 20, 14, 14, 14, 12, 12, 14]
     for i, ancho in enumerate(anchos, 1):
         det.column_dimensions[det.cell(row=1, column=i).column_letter].width = ancho
     ult = len(datos) + 1
     det.freeze_panes = "A2"
-    det.auto_filter.ref = f"A1:T{ult}"
+    det.auto_filter.ref = f"A1:U{ult}"
 
     # ---------------- hoja RESUMEN ----------------
     res = out.create_sheet("RESUMEN", 0)
@@ -975,6 +1027,7 @@ function pintar(){
       <td>
         <span class="est"><i style="background:${c[1]}"></i>${r.estatus || "SIN ESTATUS"}</span><br>
         <select ${disTot} data-f="${r.fila}" data-c="estatus" style="margin-top:4px">${opts}</select>
+        ${r.fecha_atencion ? '<span style="display:block;font-size:10px;color:#0F5348;margin-top:2px">✔ ' + esc(r.fecha_atencion) + (r.dias_res != null ? " · " + r.dias_res + " días" : "") + '</span>' : ""}
       </td>
       <td><input ${disTot} data-f="${r.fila}" data-c="po" value="${esc(r.po)}"></td>
       <td><input ${disTot} data-f="${r.fila}" data-c="monto" value="${esc(r.monto)}" placeholder="0.00"></td>
@@ -999,6 +1052,16 @@ async function guardar(fila, btn){
     if (res.ok) {
       for (const campo of ["comentario_mili","proveedor","estatus","po","monto"]) {
         if (campo in datos) reg[campo] = datos[campo];
+      }
+      /* reflejar la fecha de atención automática sin recargar */
+      if ("estatus" in datos) {
+        if (datos.estatus === "ATENDIDO" && !reg.fecha_atencion) {
+          reg.fecha_atencion = new Date().toLocaleDateString("es-PE");
+          reg.dias_res = reg.dias;
+        } else if (datos.estatus !== "ATENDIDO" && reg.fecha_atencion) {
+          reg.fecha_atencion = "";
+          reg.dias_res = null;
+        }
       }
       aviso("✅ Fila " + fila + " actualizada en el Excel");
       pintar();
@@ -1163,6 +1226,16 @@ svg text { font-family:"Segoe UI",system-ui,Arial,sans-serif; }
       <div class="sub">Suma de los montos registrados en la columna MONTO (S/) del panel de control</div>
       <div id="g-gasto"></div>
     </div>
+    <div class="tarjeta">
+      <h2>Tiempo de atención por prioridad</h2>
+      <div class="sub">Días promedio entre el registro y la atención — solo casos atendidos con fecha registrada</div>
+      <div id="g-tiempo-prioridad"></div>
+    </div>
+    <div class="tarjeta">
+      <h2>Tiempo de atención por proveedor</h2>
+      <div class="sub">Días promedio por cotización de proveedor — solo casos atendidos con fecha registrada</div>
+      <div id="g-tiempo-proveedor"></div>
+    </div>
   </div>
 </div>
 <script>
@@ -1185,11 +1258,14 @@ const total = DATOS.length;
 const nAbiertos = DATOS.filter(abierto).length;
 const nAtendidos = total - nAbiertos;
 const gastoTotal = DATOS.reduce((s,r) => s + monto(r), 0);
+const conTiempo = DATOS.filter(r => r.dias_res !== null && r.dias_res !== undefined);
+const promedioDias = conTiempo.length ? conTiempo.reduce((s,r) => s + r.dias_res, 0) / conTiempo.length : null;
 document.getElementById("kpis").innerHTML = [
   ["Total de casos", total],
   ["Abiertos", nAbiertos],
   ["Atendidos", nAtendidos],
   ["% atendido", total ? Math.round(nAtendidos*100/total) + "%" : "-"],
+  ["Días prom. de atención", promedioDias === null ? "—" : promedioDias.toFixed(1)],
   ["Gasto registrado", gastoTotal ? fmtS(gastoTotal) : "S/ 0.00"]
 ].map(([n,v]) => `<div class="kpi"><div class="valor">${v}</div><div class="nombre">${n}</div></div>`).join("");
 
@@ -1277,6 +1353,31 @@ if (Object.keys(gasto).length) {
   document.getElementById("g-gasto").innerHTML =
     "<div class='aviso-vacio'>Aún no hay montos registrados.<br>El administrador puede ingresar el MONTO (S/) de cada cotización en el panel de control<br>y este gráfico se llenará automáticamente.</div>";
 }
+
+/* tiempos de atención */
+function promediosPor(claveFn){
+  const grupos = {};
+  for (const r of conTiempo) {
+    const k = claveFn(r);
+    if (!k) continue;
+    grupos[k] = grupos[k] || {suma:0, n:0};
+    grupos[k].suma += r.dias_res;
+    grupos[k].n++;
+  }
+  return Object.entries(grupos)
+    .map(([k, g]) => [k + " (" + g.n + " casos)", g.suma / g.n])
+    .sort((a,b) => b[1] - a[1]);
+}
+const fmtDias = v => v.toFixed(1) + " días";
+const sinTiempo = "<div class='aviso-vacio'>Se calculará automáticamente a medida que los casos<br>pasen a ATENDIDO (la fecha de atención se registra sola).</div>";
+const porPrioridad = promediosPor(r => r.prioridad || "SIN PRIORIDAD");
+const porProveedor = promediosPor(r => r.proveedor).slice(0, 10);
+document.getElementById("g-tiempo-prioridad").innerHTML = "";
+document.getElementById("g-tiempo-proveedor").innerHTML = "";
+if (porPrioridad.length) barrasH("g-tiempo-prioridad", porPrioridad, "#0F6B5C", fmtDias);
+else document.getElementById("g-tiempo-prioridad").innerHTML = sinTiempo;
+if (porProveedor.length) barrasH("g-tiempo-proveedor", porProveedor, "#B45309", fmtDias);
+else document.getElementById("g-tiempo-proveedor").innerHTML = sinTiempo;
 
 graficoMeses();
 })();
